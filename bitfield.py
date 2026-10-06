@@ -1,0 +1,1 @@
+# handles the bitfield requirements instead of pushing it all onto file_manager
