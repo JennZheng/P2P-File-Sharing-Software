@@ -10,7 +10,10 @@ common = {}
 # Assign configuration variables
 with open(COMMON_CONFIG_PATH) as f:
     for line in f:
-        key, value = line.split()
+        parts = line.split()
+        if not parts:
+            continue  # skip blank lines
+        key, value = parts
         common[key] = value
 
 # Assign from dictionary
@@ -32,7 +35,10 @@ peers = []
 # Format: tuple of ([peer ID] [hostname] [listening port] [has file or not])
 with open(PEER_INFO_PATH) as f:
     for line in f:
-        peer_id, hostname, port, has_file = line.split()
+        parts = line.split()
+        if not parts:
+            continue  # skip blank lines
+        peer_id, hostname, port, has_file = parts
         peers.append((int(peer_id), hostname, int(port), has_file == "1"))
 
 # find neighboring peers (before & after me) for connection initialization
