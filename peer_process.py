@@ -7,35 +7,45 @@
 import sys
 import time
 import config
+from bitfield import Bitfield
 from connection_manager import ConnectionManager
+from logger import EventLogger
+from peer_state import PeerState
 
 def main():
      # make sure an id was given
     if len(sys.argv) != 2:
         print("usage: python peer_process.py <peer_id>")
-        return
+        return 1
 
     # read our id from the command line - python peer_process.py 1001
-    my_id = int(sys.argv[1])
+    try:
+        my_id = int(sys.argv[1])
+        my_entry, peers_before_me, peers_after_me = config.find_peers(my_id)
+    except ValueError as error:
+        print(error)
+        return 1
 
     # find our own entry, the peers before us (we connect to), and the peers after us (they connect to us)
-    my_entry, peers_before_me, peers_after_me = config.find_peers(my_id)
     my_peer_id, my_host, my_port, i_have_file = my_entry
 
-    # create the logger and the connection manage
-    manager = ConnectionManager(my_id, my_host, my_port)
+    state = PeerState(my_id, Bitfield(config.NumPieces, i_have_file))
+    with EventLogger(my_id) as logger:
+        manager = ConnectionManager(my_id, my_host, my_port, logger, state)
+        try:
+            # Listen first, so later peers can connect to us.
+            manager.start_listening()
+            for before_peer_id, before_host, before_port, _ in peers_before_me:
+                manager.connect_to_before_peers(before_host, before_port, before_peer_id)
 
-    # listen first, so later peers can connect to us
-    manager.start_listening()
-
-    # connect to every peer listed before us
-    for before_peer in peers_before_me:
-        before_peer_id, before_host, before_port, before_has_file = before_peer
-        manager.connect_to_before_peers(before_host, before_port, before_peer_id)
-
-    time.sleep(10) # for the sake of testing and keeping the process alive until thread can finish - needs to be replaced with loop later
-    print("my connections:", list(manager.connections))
+            # Temporary networking demo; transfer completion is not implemented yet.
+            time.sleep(10)
+            print("my connections:", list(manager.connections))
+        finally:
+            # Stop workers before their logger is closed.
+            manager.stop()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

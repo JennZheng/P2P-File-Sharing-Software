@@ -46,11 +46,30 @@ class PeerState:
 
     # Called after receiving a BITFIELD message
     def update_neighbor_bitfield(self, peer_id, bitfield):
+        if bitfield.num_pieces != self.my_bitfield.num_pieces:
+            raise ValueError("neighbor bitfield has the wrong number of pieces")
         with self._lock:
             self.neighbor_bitfields[peer_id] = bitfield
 
             if bitfield.is_complete():
                 self.completed_peers.add(peer_id)
+            else:
+                self.completed_peers.discard(peer_id)
+
+    def remove_disconnected_peer(self, peer_id):
+        with self._lock:
+            self.neighbor_bitfields.pop(peer_id, None)
+            self.interested_peers.discard(peer_id)
+            self.preferred_neighbors.discard(peer_id)
+            if self.optimistic_neighbor == peer_id:
+                self.optimistic_neighbor = None
+            self.download_rates.pop(peer_id, None)
+            for piece_index, owner in list(self.pending_requests.items()):
+                if owner == peer_id:
+                    del self.pending_requests[piece_index]
+            self.choked_by.discard(peer_id)
+            self.choked_peers.discard(peer_id)
+            self.completed_peers.discard(peer_id)
 
     # Returns a neighbor's bitfield if known
     def get_neighbor_bitfield(self, peer_id):
