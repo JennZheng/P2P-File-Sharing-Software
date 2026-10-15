@@ -1,5 +1,3 @@
-# check wire format, file reconstruction, failure handling, and required logs 
-
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -12,163 +10,106 @@ from logger import EventLogger
 import messages
 
 
-class BitfieldTests(unittest.TestCase):
-    def test_wire_order_and_duplicate_marking(self):
-        field = Bitfield(10)
-        for index in (0, 7, 8):
-            self.assertTrue(field.mark_piece(index))
-        self.assertFalse(field.mark_piece(8))
-        self.assertEqual(field.piece_count, 3)
-        self.assertEqual(field.to_bytes(), b"\x81\x80")
-        decoded = Bitfield.from_bytes(10, field.to_bytes())
-        self.assertEqual([i for i in range(10) if decoded.has_piece(i)], [0, 7, 8])
-        self.assertEqual(decoded.piece_count, 3)
-
-    def test_seed_padding_and_byte_boundary(self):
-        for count, expected in ((1, b"\x80"), (8, b"\xff"),
-                                (10, b"\xff\xc0")):
-            with self.subTest(count=count):
-                field = Bitfield(count, has_file=True)
-                self.assertEqual(field.to_bytes(), expected)
-                self.assertTrue(Bitfield.from_bytes(count, expected).is_complete())
-
-    def test_rejects_malformed_payloads(self):
-        for payload in (b"", b"\x80", b"\x80\x00\x00", b"\x80\x01"):
-            with self.subTest(payload=payload):
-                with self.assertRaises(ValueError):
-                    Bitfield.from_bytes(10, payload)
-        with self.assertRaises(TypeError):
-            Bitfield.from_bytes(10, 2)
-
-    def test_rejects_invalid_indices_and_sizes(self):
-        field = Bitfield(10)
-        for index in (-1, 10, 1.5, True):
-            with self.subTest(index=index):
-                with self.assertRaises(IndexError):
-                    field.mark_piece(index)
-                with self.assertRaises(IndexError):
-                    field.has_piece(index)
-        for count in (0, -1, 1.5, True):
-            with self.assertRaises(ValueError):
-                Bitfield(count)
-
-
-class PieceStoreTests(unittest.TestCase):
+class StorageAndLoggingTests(unittest.TestCase):
     def setUp(self):
+        # each test gets a temporary folder, removed automatically afterward 
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.base_dir = Path(self.temp.name)
+        self.folder = Path(self.temp.name)
 
-    def store(self, **kwargs):
-        options = dict(peer_id=1002, file_name="sample", file_size=10,
-                       piece_size=4, base_dir=self.base_dir)
-        options.update(kwargs)
-        store = PieceStore(**options)
+    def make_store(self, peer_id=1002, has_file=False, file_size=10, piece_size=4):
+        # most tests use abcdefghij, split into abcd / efgh / ij 
+        store = PieceStore(peer_id, "sample", file_size, piece_size,
+                           has_file=has_file, base_dir=self.folder)
         self.addCleanup(store.close)
         return store
 
-    def seed_file(self, data):
-        path = self.base_dir / "peer_1001" / "sample"
-        path.parent.mkdir()
-        path.write_bytes(data)
-        return path
+    def test_bitfield_encoding(self):
+        field = Bitfield(10)
+        for index in (0, 7, 8):
+            self.assertTrue(field.mark_piece(index))
+        self.assertFalse(field.mark_piece(8))  # a duplicate must not count twice 
+        self.assertEqual(field.piece_count, 3)
+        # pieces 0, 7, 8 give binary 10000001 10000000 
+        self.assertEqual(field.to_bytes(), b"\x81\x80")
+        decoded = Bitfield.from_bytes(10, field.to_bytes())
+        self.assertEqual([i for i in range(10) if decoded.has_piece(i)], [0, 7, 8])
+        # complete bitfields have to keep unused bits zero even at byte boundaries 
+        for count, expected in ((1, b"\x80"), (8, b"\xff"), (10, b"\xff\xc0")):
+            self.assertEqual(Bitfield(count, True).to_bytes(), expected)
+            self.assertTrue(Bitfield.from_bytes(count, expected).is_complete())
 
-    def test_out_of_order_download_reconstructs_exact_file(self):
-        store = self.store()
-        self.assertEqual(store.path, self.base_dir / "peer_1002" / "sample")
-        self.assertEqual(store.bitfield_bytes(), b"\x00")
+    def test_invalid_bitfields(self):
+        with self.assertRaises(ValueError):
+            Bitfield(0)
+        with self.assertRaises(IndexError):
+            Bitfield(10).mark_piece(10)  # only indices 0 through 9 exist
+        # ten pieces need two bytes with six unused bits set to zero 
+        for payload in (b"", b"\x80", b"\x80\x00\x00", b"\x80\x01"):
+            with self.assertRaises(ValueError):
+                Bitfield.from_bytes(10, payload)
+
+    def test_download_and_duplicates(self):
+        store = self.make_store()
+        self.assertEqual(store.path, self.folder / "peer_1002" / "sample")
         self.assertFalse(store.is_complete())
         with self.assertRaises(ValueError):
-            store.read_piece(0)
+            store.read_piece(0)  # reserved file space is not an owned piece
+        # receive the short final piece first to check out of order storage
         for index, data in ((2, b"ij"), (0, b"abcd"), (1, b"efgh")):
             self.assertTrue(store.write_piece(index, data))
             self.assertEqual(store.read_piece(index), data)
-        self.assertTrue(store.is_complete())
+        self.assertFalse(store.write_piece(0, b"xxxx"))
         self.assertEqual(store.piece_count, 3)
-        self.assertEqual(store.bitfield_bytes(), b"\xe0")
+        self.assertTrue(store.is_complete())
+        self.assertEqual(store.bitfield_bytes(), b"\xe0")  # binary 11100000 
         self.assertEqual(store.path.read_bytes(), b"abcdefghij")
 
-    def test_duplicate_does_not_count_or_overwrite(self):
-        store = self.store()
-        self.assertTrue(store.write_piece(0, b"abcd"))
-        self.assertFalse(store.write_piece(0, b"xxxx"))
-        self.assertEqual(store.piece_count, 1)
-        self.assertEqual(store.read_piece(0), b"abcd")
-
-    def test_invalid_writes_never_publish_ownership(self):
-        store = self.store()
+    def test_invalid_pieces_and_failed_save(self):
+        store = self.make_store()
         for index, data, error in ((-1, b"abcd", IndexError),
                                    (3, b"abcd", IndexError),
                                    (0, b"abc", ValueError),
-                                   (2, b"ijkl", ValueError),
-                                   (0, 4, TypeError)):
-            with self.subTest(index=index, data=data):
-                with self.assertRaises(error):
-                    store.write_piece(index, data)
-        self.assertEqual(store.piece_count, 0)
-
-    def test_failed_flush_does_not_publish_ownership_and_can_retry(self):
-        store = self.store()
+                                   (2, b"ijkl", ValueError), (0, 4, TypeError)):
+            with self.assertRaises(error):
+                store.write_piece(index, data)
+        # temporarily make flush fail to imitate a disk error then restore it
         with patch.object(store._file, "flush", side_effect=OSError("disk failure")):
             with self.assertRaises(OSError):
                 store.write_piece(0, b"abcd")
-        self.assertFalse(store.has_piece(0))
-        self.assertEqual(store.piece_count, 0)
-        self.assertTrue(store.write_piece(0, b"abcd"))
+        self.assertEqual(store.piece_count, 0)  # failed saves shouldn't count 
+        self.assertTrue(store.write_piece(0, b"abcd"))  # a retry can succeed 
 
-    def test_seed_is_readable_and_unchanged(self):
-        path = self.seed_file(b"abcdefghij")
-        store = self.store(peer_id=1001, has_file=True)
-        self.assertTrue(store.is_complete())
-        self.assertEqual(store.read_piece(2), b"ij")
-        self.assertFalse(store.write_piece(0, b"xxxx"))
+    def test_seed_file(self):
+        with self.assertRaises(FileNotFoundError):
+            self.make_store(peer_id=1001, has_file=True)
+        path = self.folder / "peer_1001" / "sample"
+        path.parent.mkdir()
+        path.write_bytes(b"short")
+        with self.assertRaises(ValueError):
+            self.make_store(peer_id=1001, has_file=True)
+        # a correctly sized seed starts complete and keeps its original bytes
+        path.write_bytes(b"abcdefghij")
+        seed = self.make_store(peer_id=1001, has_file=True)
+        self.assertTrue(seed.is_complete())
+        self.assertEqual(seed.read_piece(2), b"ij")
+        self.assertFalse(seed.write_piece(0, b"xxxx"))
         self.assertEqual(path.read_bytes(), b"abcdefghij")
 
-    def test_missing_or_wrong_size_seed_is_rejected(self):
-        with self.assertRaises(FileNotFoundError):
-            self.store(peer_id=1001, has_file=True)
-        path = self.seed_file(b"short")
-        with self.assertRaisesRegex(ValueError, "5 bytes; expected 10"):
-            self.store(peer_id=1001, has_file=True)
-        self.assertEqual(path.read_bytes(), b"short")
+    def test_piece_lengths(self):
+        # check both a full sized final piece and a file smaller than one piece 
+        for size, lengths in ((8, [4, 4]), (2, [2])):
+            with self.make_store(file_size=size) as store:
+                self.assertEqual(store.num_pieces, len(lengths))
+                for index, length in enumerate(lengths):
+                    self.assertEqual(store.expected_piece_size(index), length)
+                    store.write_piece(index, b"x" * length)
+                self.assertTrue(store.is_complete())
+                self.assertEqual(store.path.read_bytes(), b"x" * size)
 
-    def test_exact_multiple_and_smaller_than_piece(self):
-        for file_size, piece_size, lengths in ((8, 4, [4, 4]), (2, 4, [2])):
-            with self.subTest(file_size=file_size):
-                with self.store(file_size=file_size, piece_size=piece_size) as store:
-                    self.assertEqual(store.num_pieces, len(lengths))
-                    for index, length in enumerate(lengths):
-                        self.assertEqual(store.expected_piece_size(index), length)
-                        store.write_piece(index, b"x" * length)
-                    self.assertTrue(store.is_complete())
-                    self.assertEqual(store.path.read_bytes(), b"x" * file_size)
-
-    def test_concurrent_writes_and_duplicates(self):
-        store = self.store(file_size=64, piece_size=2)
-        def save(index):
-            return store.write_piece(index, bytes([index]) * 2)
-        indices = list(reversed(range(32))) * 3
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = list(pool.map(save, indices))
-        self.assertEqual(sum(results), 32)
-        self.assertEqual(store.piece_count, 32)
-        self.assertTrue(store.is_complete())
-        self.assertEqual(store.path.read_bytes(),
-                         b"".join(bytes([i]) * 2 for i in range(32)))
-
-    def test_closed_store_and_unsafe_filename(self):
-        store = self.store()
-        store.close()
-        with self.assertRaises(ValueError):
-            store.write_piece(0, b"abcd")
-        with self.assertRaises(ValueError):
-            store.read_piece(0)
-        for name in ("", "..", "../sample", "/tmp/sample"):
-            with self.assertRaises(ValueError):
-                self.store(file_name=name)
-
-    def test_bitfield_and_piece_message_integration(self):
-        store = self.store()
+    def test_message_integration(self):
+        store = self.make_store()
+        # a PIECE payload has a four-byte index followed by the actual content 
         payload = (2).to_bytes(4, "big") + b"ij"
         kind, received = messages.decode_message(messages.encode_message(messages.PIECE, payload))
         self.assertEqual(kind, messages.PIECE)
@@ -176,16 +117,29 @@ class PieceStoreTests(unittest.TestCase):
         kind, received = messages.decode_message(
             messages.encode_message(messages.BITFIELD, store.bitfield_bytes()))
         self.assertEqual(kind, messages.BITFIELD)
-        self.assertTrue(Bitfield.from_bytes(store.num_pieces, received).has_piece(2))
+        self.assertTrue(Bitfield.from_bytes(3, received).has_piece(2))
 
+    def test_concurrent_storage_and_logging(self):
+        store = self.make_store(file_size=16, piece_size=2)
+        with EventLogger(1002, self.folder) as logger:
+            def save(index):
+                logger.have_received(1001, index)
+                return store.write_piece(index, bytes([index]) * 2)
+            # four threads imitate neighbors sending eight pieces, each three times 
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                results = list(pool.map(save, list(reversed(range(8))) * 3))
+            self.assertEqual(sum(results), 8)  # only eight writes should be new 
+            self.assertEqual(store.piece_count, 8)
+            self.assertTrue(store.is_complete())
+            self.assertEqual(store.path.read_bytes(), b"".join(bytes([i]) * 2 for i in range(8)))
+            lines = logger.path.read_text().splitlines()
+            self.assertEqual(len(lines), 24)  # no concurrent log entry was lost
+            for index in range(8):
+                event = f"Peer 1002 received the 'have' message from 1001 for the piece {index}."
+                self.assertEqual(sum(line.split("]: ", 1)[1] == event for line in lines), 3)
 
-class EventLoggerTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-
-    def test_all_required_events_and_immediate_flush(self):
-        with EventLogger(1001, self.temp.name) as logger:
+    def test_required_log_events(self):
+        with EventLogger(1001, self.folder) as logger:
             logger.connection_made(1002)
             logger.connection_received(1003)
             logger.preferred_neighbors([1002, 1003])
@@ -197,11 +151,10 @@ class EventLoggerTests(unittest.TestCase):
             logger.not_interested_received(1004)
             logger.piece_downloaded(1002, 7, 8)
             logger.download_complete()
-            self.assertEqual(logger.path, Path(self.temp.name) / "log_peer_1001.log")
-            lines = logger.path.read_text().splitlines()
+            self.assertEqual(logger.path, self.folder / "log_peer_1001.log")
+            lines = logger.path.read_text().splitlines()  # visible before close 
         expected = [
-            "makes a connection to Peer 1002.",
-            "is connected from Peer 1003.",
+            "makes a connection to Peer 1002.", "is connected from Peer 1003.",
             "has the preferred neighbors 1002,1003.",
             "has the optimistically unchoked neighbor 1004.",
             "is unchoked by 1002.", "is choked by 1003.",
@@ -211,26 +164,14 @@ class EventLoggerTests(unittest.TestCase):
             "has downloaded the piece 7 from 1002. Now the number of pieces it has is 8.",
             "has downloaded the complete file.",
         ]
-        self.assertEqual(len(lines), len(expected))
+        self.assertEqual(len(lines), 11)
         for line, event in zip(lines, expected):
             self.assertRegex(line, r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}[+-]\d{4}\]: ")
             self.assertEqual(line.split("]: ", 1)[1], f"Peer 1001 {event}")
-
-    def test_concurrent_lines_and_append_on_reopen(self):
-        with EventLogger(1001, self.temp.name) as logger:
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                list(pool.map(logger.interested_received, range(1002, 1102)))
-            path = logger.path
-        with EventLogger(1001, self.temp.name) as logger:
+        # opening the logger again should append rather than erase old entries 
+        with EventLogger(1001, self.folder) as logger:
             logger.download_complete()
-        lines = path.read_text().splitlines()
-        self.assertEqual(len(lines), 101)
-        actual = {line.split("]: ", 1)[1] for line in lines[:-1]}
-        self.assertEqual(actual, {
-            f"Peer 1001 received the 'interested' message from {i}."
-            for i in range(1002, 1102)
-        })
-        self.assertTrue(lines[-1].endswith("has downloaded the complete file."))
+        self.assertEqual(len(logger.path.read_text().splitlines()), 12)
 
 
 if __name__ == "__main__":

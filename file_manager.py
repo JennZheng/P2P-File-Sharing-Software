@@ -2,7 +2,7 @@
 
 import os
 from pathlib import Path
-from threading import RLock
+from threading import Lock
 
 from bitfield import Bitfield
 
@@ -31,7 +31,7 @@ class PieceStore:
         # each peer has a separate copy, such as peer_1001/thefile 
         self.path = Path(base_dir) / f"peer_{peer_id}" / file_name
         # reading and writing share a file cursor 
-        self._lock = RLock()
+        self._lock = Lock()
         self._bitfield = Bitfield(self.num_pieces, has_file)
 
         if has_file:

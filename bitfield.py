@@ -1,6 +1,6 @@
 # Track piece ownership and encode the protocol's packed bitfield 
 
-from threading import RLock
+from threading import Lock
 
 
 class Bitfield:
@@ -17,7 +17,7 @@ class Bitfield:
         self._bits = bytearray((num_pieces + 7) // 8)
         self._count = 0
         # keep the bits and count consistent when multiple threads update them
-        self._lock = RLock()
+        self._lock = Lock()
         if has_file:
             # a seed owns every real piece; spare bits remain zero
             for index in range(num_pieces):

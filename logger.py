@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from threading import Lock
 
 
 class EventLogger:
@@ -16,7 +16,7 @@ class EventLogger:
         self.path = Path(base_dir) / f"log_peer_{peer_id}.log"
         self.path.parent.mkdir(parents=True, exist_ok=True)
         # prevent different threads from mixing their log entries together
-        self._lock = RLock()
+        self._lock = Lock()
         # append preserves entries from earlier runs instead of erasing them 
         self._file = self.path.open("a", encoding="utf-8")
 
@@ -90,5 +90,5 @@ class EventLogger:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        # release the log file when the with block ends, including on exceptions 
+        # release the log file when the with block ends including on exceptions 
         self.close()
