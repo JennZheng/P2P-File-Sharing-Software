@@ -73,15 +73,12 @@ class ConnectionManager:
             received_id = self.exchange_handshake(sock)
             self.connections[received_id] = sock
 
-    # Milestone 3: potential other functions
-    # read_exact(sock, n): read n bytes from a socket
-
-
-
-
-
-
-
-
-    
-
+    # read n bytes from socket, sock
+    def read_exact(self, sock, n):
+        data = b""
+        while len(data) < n:
+            chunk = sock.recv(n - len(data)) # ask only for the bytes still missing
+            if not chunk: # empty means the other side closed
+                raise ConnectionError("connection closed early")
+            data += chunk
+        return data
