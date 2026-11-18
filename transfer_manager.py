@@ -1,9 +1,5 @@
 # coordinates getting pieces from other peers
 
-import random
-import messages
-
-
 # Some preliminary notes/timeline for my understanding:
 """
 A is interested in B's pieces.
@@ -34,14 +30,23 @@ A sends the next REQUEST message to B, unless B has otherwise choked A
 
 """
 
-
 import random
 import messages
 
 class TransferManager:
     # initialize the object and store any info needed
-    def __init__(self, state, store, conn_manager, logger):
-        pass
+    def __init__(self, peer_state, piece_store, connection_manager, event_logger):
+         # PeerState instance: bitfields, choke status, pending requests, download rates, and more of peers
+        self.peer_state = peer_state
+
+        # PieceStore instance: reads and writes pieces in the file
+        self.piece_store = piece_store
+
+        # ConnectionManager instance: sends actual messages to peers
+        self.connection_manager = connection_manager
+
+        # EventLogger instance: writes the log events
+        self.event_logger = event_logger
 
     # Any time after a peer sends us BITFIELD message or HAVE message, we need to update and share our interests (INTERESTED or NOT_INTERESTED)
     def send_interest(self, remote_peer_id):
