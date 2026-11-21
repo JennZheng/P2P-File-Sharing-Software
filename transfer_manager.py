@@ -49,23 +49,41 @@ class TransferManager:
         self.event_logger = event_logger
 
     # Any time after a peer sends us BITFIELD message or HAVE message, we need to update and share our interests (INTERESTED or NOT_INTERESTED)
-    def send_interest(self, remote_peer_id):
-        pass
+    def send_interest(self, peer_id):
+        # 1. understand what pieces the peer/neighbor has
+        neighbor = self.peer_state.get_neighbor_bitfield(peer_id)
+
+        # 2. check if we do not have neighbor info yet
+        if neighbor is None:
+            return
+
+        # 3. check if there is at least 1 piece we are interested in
+        wanted_piece_exists = False
+        for piece_index in range(self.peer_state.my_bitfield.num_pieces):
+            if neighbor.has_piece(piece_index) and not self.peer_state.my_bitfield.has_piece(piece_index):
+                wanted_piece_exists = True
+                break # break out of loop as one piece is enough to send interested message
+
+        # 4. send INTERESTED/NOT_INTERESTED
+        if wanted_piece_exists:
+            self.connection_manager.send_protocol_message(peer_id, messages.INTERESTED)
+        else:
+            self.connection_manager.send_protocol_message(peer_id, messages.NOT_INTERESTED)
 
     # requests (REQUEST) a missing piece from peer as long as peer has piece we lack, are unchoked by that peer, and have not requested that piece yet
-    def request_piece(self, remote_peer_id):
+    def request_piece(self, peer_id):
         pass
 
     # hanldes a REQUEST message on the receiver end: reads the piece from the store and sends the PIECE if the peer isn't choked
     # sends piece
-    def receive_request_message(self, remote_peer_id, payload):
+    def receive_request_message(self, peer_id, payload):
         pass
 
     # handles a PIECE message on the receiver end: writes it, updates info and sends HAVE to all neighbors, checks completion, requests the next piece
     # reads piece
-    def receive_piece_message(self, remote_peer_id, payload):
+    def receive_piece_message(self, peer_id, payload):
         pass
 
     # clears pending requests to a peer that choked us so those pieces can be requested from anothdr peer
-    def clear_pending_requests(self, remote_peer_id):
+    def clear_pending_requests(self, peer_id):
         pass
