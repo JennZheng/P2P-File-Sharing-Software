@@ -112,8 +112,43 @@ class TransferManager:
     # handles a PIECE message on the receiver end: writes it, updates info and sends HAVE to all neighbors, checks completion, requests the next piece
     # reads piece
     def receive_piece_message(self, peer_id, payload):
-        pass
+        # 1. load piece index (first 4 bytes) & piece data (5th byte forward)
+        piece_index = int.from_bytes(payload[:4], "big")
+        piece_data = payload[4:]
+
+        # 2. set the request to not pending 
+        self.peer_state.remove_pending_request(piece_index)
+
+        # 3. write the piece data to our file 
+        # returns True only if it is a new piece has been written bc duplicates may happen (not requiring a new write)
+        is_new_piece = self.piece_store.write_piece(piece_index, piece_data)
+
+        if is_new_piece:
+            # 4. update bitfield with our newly acquired data
+            self.peer_state.my_bitfield.mark_piece(piece_index)
+
+            # 5. update download rate of the peer that gave us this data
+            self.peer_state.update_download_rate(peer_id, len(piece_data))
+
+            # 6. log download event with new piece count
+            self.event_logger.piece_downloaded(peer_id, piece_index, self.piece_store.piece_count)
+
+            # 7. send HAVE message to all neighbors - to update that we now have this piece
+            for neighbor_id in list(self.connection_manager.connections):
+                self.connection_manager.send_protocol_message(neighbor_id, messages.HAVE, payload[:4])
+
+            # 8. log again if we now have the whole file
+            if self.piece_store.is_complete():
+                self.event_logger.download_complete()
+
+        # 9. keep requesting pieces from this peer
+        self.request_piece(peer_id)
 
     # clears pending requests to a peer that choked us so those pieces can be requested from anothdr peer
     def clear_pending_requests(self, peer_id):
-        pass
+        # 1. loop over a copy of the list since we remove entries (& alter list) while looping
+        for piece_index, piece_owner in list(self.peer_state.pending_requests.items()):
+            
+            # 2. only remove piece requests to peer that choked us
+            if piece_owner == peer_id:
+                self.peer_state.remove_pending_request(piece_index)
