@@ -72,12 +72,42 @@ class TransferManager:
 
     # requests (REQUEST) a missing piece from peer as long as peer has piece we lack, are unchoked by that peer, and have not requested that piece yet
     def request_piece(self, peer_id):
-        pass
+        # 1. do not request from a peer that we are choked by
+        if self.peer_state.is_choked_by(peer_id):
+            return
 
-    # hanldes a REQUEST message on the receiver end: reads the piece from the store and sends the PIECE if the peer isn't choked
+        # 2. get pieces this peer HAS that we DO NOT HAVE (& have not already requested)
+        missing_pieces = self.peer_state.get_missing_pieces_from_peer(peer_id)
+
+        # 3. check if there are remaining pieces to request
+        if len(missing_pieces) == 0:
+            return
+
+        # 4. pick a random piece from our missing_pieces list
+        piece_index = random.choice(missing_pieces)
+
+        # 5. add a pending request so we do not request same piece again
+        self.peer_state.add_pending_request(piece_index, peer_id)
+
+        # 6. send REQUEST with the 4-byte piece index as the payload (in big endian)
+        self.connection_manager.send_protocol_message(peer_id, messages.REQUEST, piece_index.to_bytes(4, "big"))
+
+    # handles a REQUEST message on the receiver end: reads the piece from the store and sends the PIECE if the peer isn't choked
     # sends piece
     def receive_request_message(self, peer_id, payload):
-        pass
+        # 1. do not send piece to a peer that we are choking
+        if self.peer_state.am_choking(peer_id):
+            return
+
+        # 2. store the requested piece index from the payload
+        piece_index = int.from_bytes(payload, "big")
+
+        # 3. read and store the piece's data from our file
+        piece_data = self.piece_store.read_piece(piece_index)
+
+        # 4. send PIECE message: 4-byte piece index + the piece data
+        piece_index_bytes = piece_index.to_bytes(4, "big")
+        self.connection_manager.send_protocol_message(peer_id, messages.PIECE, piece_index_bytes + piece_data)
 
     # handles a PIECE message on the receiver end: writes it, updates info and sends HAVE to all neighbors, checks completion, requests the next piece
     # reads piece
