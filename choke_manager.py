@@ -61,7 +61,11 @@ class ChokeManager:
       # If nobody is currently requesting pieces from us
       if not interested_peers:
         self.peer_state.set_preferred_neighbors(set())
+        self.peer_state.set_optimistic_neighbor(None)
         self.logger.preferred_neighbors([])
+
+        self._apply_upload_permissions()
+        self.peer_state.reset_download_rates()
         return
 
       # If we already have the whole file, choose randomly
@@ -114,6 +118,7 @@ class ChokeManager:
       # If no eligible peer exists
       if not candidates:
         self.peer_state.set_optimistic_neighbor(None)
+        self._apply_upload_permissions()
         return
 
       # Randomly choose one additional peer
@@ -130,6 +135,9 @@ class ChokeManager:
     def _apply_upload_permissions(self):
       preferred = self.peer_state.get_preferred_neighbors()
       optimistic = self.peer_state.get_optimistic_neighbor()
+      if optimistic is not None and optimistic not in self.peer_state.get_interested_peers():
+        self.peer_state.set_optimistic_neighbor(None)
+        optimistic = None
 
       # Peers in this set may currently download from us
       upload_set = set(preferred)
@@ -138,26 +146,24 @@ class ChokeManager:
       if optimistic is not None:
         upload_set.add(optimistic)
 
-      connected_peers = list(self.connection_manager.connections.keys())
+      connected_peers = self.connection_manager.get_connected_peers()
 
       for peer_id in connected_peers:
         # This peer should currently have upload access
         if peer_id in upload_set:
           # Unchoke peers that are currently choked
           if self.peer_state.am_choking(peer_id):
-            self.connection_manager.send_protocol_message(peer_id, messages.UNCHOKE)
-
-            # Record local choke state
+            # Record permission before the peer can respond with a REQUEST 
             self.peer_state.unchoke_peer(peer_id)
+            self.connection_manager.send_protocol_message(peer_id, messages.UNCHOKE)
 
         # This peer should not have upload access
         else:
           # Only choke peers that are currently unchoked
           if not self.peer_state.am_choking(peer_id):
-            self.connection_manager.send_protocol_message(peer_id, messages.CHOKE)
-
-            # Record local choke state
+            # Stop accepting requests before announcing the change 
             self.peer_state.choke_peer(peer_id)
+            self.connection_manager.send_protocol_message(peer_id, messages.CHOKE)
 
     # Runs the scheduler timers
     def run(self):

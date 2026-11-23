@@ -8,10 +8,11 @@ HANDSHAKE_SIZE = 32       # bytes in a handshake message
 HANDSHAKE_TIMEOUT = 5     # seconds to wait for connect/handshake
 
 class ConnectionManager:
-    def __init__(self, peer_id, host, port, logger, state):
+    def __init__(self, peer_id, host, port, logger, state, transferManager):
         self.peer_id = peer_id
         self.host = host
         self.port = port
+        self.transferManager = transferManager
 
         # store EventLogger instance
         self.logger = logger
@@ -96,7 +97,14 @@ class ConnectionManager:
             remote_id = self._exchange_handshake(sock)
             if expected_id is not None and remote_id != expected_id:
                 raise ValueError(f"Expected Peer {expected_id}, got Peer {remote_id}")
-            self._register_connection(remote_id, sock, incoming)
+            # Keep the connection private until its first protocol message is sent.
+            # The scheduler and receiver threads may send other messages afterward.
+            with self._lock:
+                self._register_connection(remote_id, sock, incoming)
+                if not self.send_protocol_message(
+                    remote_id, messages.BITFIELD, self.state.my_bitfield.to_bytes()
+                ):
+                    raise ConnectionError("Could not send initial bitfield")
         except Exception:
             self._close_socket(sock)
             raise
@@ -144,7 +152,12 @@ class ConnectionManager:
         try:
             while self.is_running:
                 # Read 4-byte message length prefix
-                length_bytes = self._read_exact(sock, 4)
+                length_bytes = self._read_exact(sock, 4, allow_closed=True)
+                if length_bytes is None:
+                    # Finished peers close their connections during normal shutdown.
+                    if self.is_running and not self.state.is_peer_complete(remote_peer_id):
+                        print(f"[-] Peer {remote_peer_id} disconnected before completion.")
+                    break
                 message_length = int.from_bytes(length_bytes, byteorder="big")
                 if message_length < 1:
                     raise ValueError("message must include a type byte")
@@ -152,7 +165,7 @@ class ConnectionManager:
                 # message_length covers the 1-byte type plus the payload
                 body = self._read_exact(sock, message_length)
                 message_handler.handle_message(
-                    remote_peer_id, length_bytes + body, self.state, self.logger
+                    remote_peer_id, length_bytes + body, self.state, self.logger, self.transferManager
                 )
         except (OSError, ValueError, IndexError, NotImplementedError) as e:
             if self.is_running:
@@ -161,15 +174,22 @@ class ConnectionManager:
             self.disconnect_peer(remote_peer_id, sock)
 
     # read n bytes from socket, sock
-    def _read_exact(self, sock, n):
+    def _read_exact(self, sock, n, allow_closed=False):
         data = b""
         while len(data) < n:
             chunk = sock.recv(n - len(data)) # ask only for the bytes still missing
             if not chunk: # empty means the other side closed
+                if allow_closed and not data:
+                    return None
                 raise ConnectionError("connection closed early")
             data += chunk
         return data
 
+    # Get a copy because another thread may change the connections 
+    def get_connected_peers(self):
+        with self._lock:
+            return list(self.connections)
+        
     # ------------------------------------------------------------------
     # Sending
     # ------------------------------------------------------------------
@@ -202,7 +222,7 @@ class ConnectionManager:
             del self.connections[remote_peer_id]
             self.state.remove_disconnected_peer(remote_peer_id)
         self._close_socket(sock)
-        print(f"[*] Connection and registers scrubbed for Peer {remote_peer_id}")
+        print(f"[*] Disconnected from Peer {remote_peer_id}")
 
     def stop(self):
         with self._lock:

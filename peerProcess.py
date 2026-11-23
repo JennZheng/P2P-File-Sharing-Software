@@ -11,6 +11,9 @@ from bitfield import Bitfield
 from connection_manager import ConnectionManager
 from logger import EventLogger
 from peer_state import PeerState
+from transfer_manager import TransferManager
+from file_manager import PieceStore
+from choke_manager import ChokeManager
 
 def main():
      # make sure an id was given
@@ -30,20 +33,41 @@ def main():
     my_peer_id, my_host, my_port, i_have_file = my_entry
 
     state = PeerState(my_id, Bitfield(config.NumPieces, i_have_file))
-    with EventLogger(my_id) as logger:
-        manager = ConnectionManager(my_id, my_host, my_port, logger, state)
-        try:
-            # Listen first, so later peers can connect to us.
-            manager.start_listening()
-            for before_peer_id, before_host, before_port, _ in peers_before_me:
-                manager.connect_to_before_peers(before_host, before_port, before_peer_id)
+    store = PieceStore(my_id, config.FileName, config.FileSize, config.PieceSize,
+                 has_file=i_have_file, base_dir="project_config_file_small")
+    try:
+        if i_have_file:
+            state.mark_completed_peer(my_id)
 
-            # Temporary networking demo; transfer completion is not implemented yet.
-            time.sleep(10)
-            print("my connections:", list(manager.connections))
+        logger = EventLogger(my_id)
+        try:
+            manager = ConnectionManager(my_id, my_host, my_port, logger, state, None)
+            try:
+                chokeManager = ChokeManager(state, manager, logger)
+                try:
+                    transferManager = TransferManager(state, store, manager, logger)
+                    manager.transferManager = transferManager
+                    # Listen first, so later peers can connect to us.
+                    manager.start_listening()
+                    chokeManager.start()
+                    for before_peer_id, before_host, before_port, _ in peers_before_me:
+                        manager.connect_to_before_peers(before_host, before_port, before_peer_id)
+
+                    peer_ids = [peer[0] for peer in config.peers]
+                    # Keep serving pieces until every configured peer has finished.
+                    while not state.all_peers_complete(peer_ids):
+                        transferManager.request_from_neighbors()
+                        time.sleep(0.1)
+                finally:
+                    # Stop scheduling messages before shutting down networking.
+                    chokeManager.stop()
+            finally:
+                # Stop workers before closing their logger and storage.
+                manager.stop()
         finally:
-            # Stop workers before their logger is closed.
-            manager.stop()
+            logger.close()
+    finally:
+        store.close()
     return 0
 
 

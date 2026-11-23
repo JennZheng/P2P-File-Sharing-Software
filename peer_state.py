@@ -5,6 +5,7 @@
 # download statistics, and outstanding requests.
 
 from threading import RLock
+import random
 
 class PeerState:
   
@@ -44,6 +45,24 @@ class PeerState:
         # Protect shared state across threads
         self._lock = RLock()
 
+    # Choose and reserve a piece while holding the state lock 
+    def reserve_piece(self, peer_id):
+        with self._lock:
+            if peer_id in self.choked_by:
+                return None
+
+            # Allow one pending request per neighbor 
+            if peer_id in self.pending_requests.values():
+                return None
+
+            missing_pieces = self.get_missing_pieces_from_peer(peer_id)
+            if not missing_pieces:
+                return None
+
+            piece_index = random.choice(missing_pieces)
+            self.pending_requests[piece_index] = peer_id
+            return piece_index
+        
     # Called after receiving a BITFIELD message
     def update_neighbor_bitfield(self, peer_id, bitfield):
         if bitfield.num_pieces != self.my_bitfield.num_pieces:
@@ -69,7 +88,6 @@ class PeerState:
                     del self.pending_requests[piece_index]
             self.choked_by.discard(peer_id)
             self.choked_peers.discard(peer_id)
-            self.completed_peers.discard(peer_id)
 
     # Returns a neighbor's bitfield if known
     def get_neighbor_bitfield(self, peer_id):
@@ -146,9 +164,11 @@ class PeerState:
             self.pending_requests[piece_index] = peer_id
 
     # Request completed or cancelled
-    def remove_pending_request(self, piece_index):
+    def remove_pending_request(self, piece_index, peer_id=None):
         with self._lock:
-            self.pending_requests.pop(piece_index, None)
+            owner = self.pending_requests.get(piece_index)
+            if peer_id is None or owner == peer_id:
+                self.pending_requests.pop(piece_index, None)
 
     # Check if a piece already has an active request
     def is_piece_requested(self, piece_index):
@@ -194,6 +214,14 @@ class PeerState:
         with self._lock:
             return set(self.completed_peers)
 
+    # Check whether every peer has finished downloading 
+    def all_peers_complete(self, peer_ids):
+        with self._lock:
+            for peer_id in peer_ids:
+                if peer_id not in self.completed_peers:
+                    return False
+            return True
+        
     # Returns pieces a neighbor has that we still need
     def get_missing_pieces_from_peer(self, peer_id):
         with self._lock:

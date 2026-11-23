@@ -32,6 +32,7 @@ A sends the next REQUEST message to B, unless B has otherwise choked A
 
 import random
 import messages
+from threading import Lock
 
 class TransferManager:
     # initialize the object and store any info needed
@@ -47,6 +48,7 @@ class TransferManager:
 
         # EventLogger instance: writes the log events
         self.event_logger = event_logger
+        self._piece_lock = Lock()
 
     # Any time after a peer sends us BITFIELD message or HAVE message, we need to update and share our interests (INTERESTED or NOT_INTERESTED)
     def send_interest(self, peer_id):
@@ -72,26 +74,24 @@ class TransferManager:
 
     # requests (REQUEST) a missing piece from peer as long as peer has piece we lack, are unchoked by that peer, and have not requested that piece yet
     def request_piece(self, peer_id):
-        # 1. do not request from a peer that we are choked by
-        if self.peer_state.is_choked_by(peer_id):
+        piece_index = self.peer_state.reserve_piece(peer_id)
+        if piece_index is None:
             return
 
-        # 2. get pieces this peer HAS that we DO NOT HAVE (& have not already requested)
-        missing_pieces = self.peer_state.get_missing_pieces_from_peer(peer_id)
+        payload = piece_index.to_bytes(4, "big")
+        sent = self.connection_manager.send_protocol_message(
+            peer_id, messages.REQUEST, payload
+        )
 
-        # 3. check if there are remaining pieces to request
-        if len(missing_pieces) == 0:
-            return
-
-        # 4. pick a random piece from our missing_pieces list
-        piece_index = random.choice(missing_pieces)
-
-        # 5. add a pending request so we do not request same piece again
-        self.peer_state.add_pending_request(piece_index, peer_id)
-
-        # 6. send REQUEST with the 4-byte piece index as the payload (in big endian)
-        self.connection_manager.send_protocol_message(peer_id, messages.REQUEST, piece_index.to_bytes(4, "big"))
-
+        # Release the reservation if sending failed 
+        if not sent:
+            self.peer_state.remove_pending_request(piece_index, peer_id)
+    
+    # Try requesting a piece from each connected neighbor 
+    def request_from_neighbors(self):
+        for peer_id in self.connection_manager.get_connected_peers():
+            self.request_piece(peer_id)
+   
     # handles a REQUEST message on the receiver end: reads the piece from the store and sends the PIECE if the peer isn't choked
     # sends piece
     def receive_request_message(self, peer_id, payload):
@@ -112,37 +112,42 @@ class TransferManager:
     # handles a PIECE message on the receiver end: writes it, updates info and sends HAVE to all neighbors, checks completion, requests the next piece
     # reads piece
     def receive_piece_message(self, peer_id, payload):
-        # 1. load piece index (first 4 bytes) & piece data (5th byte forward)
-        piece_index = int.from_bytes(payload[:4], "big")
-        piece_data = payload[4:]
+        with self._piece_lock:
+            # 1. load piece index (first 4 bytes) & piece data (5th byte forward)
+            piece_index = int.from_bytes(payload[:4], "big")
+            piece_data = payload[4:]
 
-        # 2. set the request to not pending 
-        self.peer_state.remove_pending_request(piece_index)
+            # 3. write the piece data to our file 
+            # returns True only if it is a new piece has been written bc duplicates may happen (not requiring a new write)
+            is_new_piece = self.piece_store.write_piece(piece_index, piece_data)
 
-        # 3. write the piece data to our file 
-        # returns True only if it is a new piece has been written bc duplicates may happen (not requiring a new write)
-        is_new_piece = self.piece_store.write_piece(piece_index, piece_data)
+            if is_new_piece:
+                # 4. update bitfield with our newly acquired data
+                self.peer_state.my_bitfield.mark_piece(piece_index)
 
-        if is_new_piece:
-            # 4. update bitfield with our newly acquired data
-            self.peer_state.my_bitfield.mark_piece(piece_index)
+            # Release this peer's request after the piece is stored and marked.
+            self.peer_state.remove_pending_request(piece_index, peer_id)
 
-            # 5. update download rate of the peer that gave us this data
-            self.peer_state.update_download_rate(peer_id, len(piece_data))
+            if is_new_piece:
+                # 5. update download rate of the peer that gave us this data
+                self.peer_state.update_download_rate(peer_id, len(piece_data))
 
-            # 6. log download event with new piece count
-            self.event_logger.piece_downloaded(peer_id, piece_index, self.piece_store.piece_count)
+                # 6. log download event with new piece count
+                self.event_logger.piece_downloaded(peer_id, piece_index, self.piece_store.piece_count)
 
-            # 7. send HAVE message to all neighbors - to update that we now have this piece
-            for neighbor_id in list(self.connection_manager.connections):
-                self.connection_manager.send_protocol_message(neighbor_id, messages.HAVE, payload[:4])
+                # 7. tell neighbors about the piece and update our interest 
+                for neighbor_id in self.connection_manager.get_connected_peers():
+                    self.connection_manager.send_protocol_message(
+                        neighbor_id, messages.HAVE, payload[:4]
+                    )
+                    self.send_interest(neighbor_id)
+                # 8. log again if we now have the whole file
+                if self.piece_store.is_complete():
+                    self.event_logger.download_complete()
+                    self.peer_state.mark_completed_peer(self.peer_state.peer_id)
 
-            # 8. log again if we now have the whole file
-            if self.piece_store.is_complete():
-                self.event_logger.download_complete()
-
-        # 9. keep requesting pieces from this peer
-        self.request_piece(peer_id)
+        # 9. try all neighbors for the next piece 
+        self.request_from_neighbors()
 
     # clears pending requests to a peer that choked us so those pieces can be requested from anothdr peer
     def clear_pending_requests(self, peer_id):
@@ -151,4 +156,4 @@ class TransferManager:
             
             # 2. only remove piece requests to peer that choked us
             if piece_owner == peer_id:
-                self.peer_state.remove_pending_request(piece_index)
+                self.peer_state.remove_pending_request(piece_index, peer_id)
