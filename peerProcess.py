@@ -34,7 +34,7 @@ def main():
 
     state = PeerState(my_id, Bitfield(config.NumPieces, i_have_file))
     store = PieceStore(my_id, config.FileName, config.FileSize, config.PieceSize,
-                 has_file=i_have_file, base_dir="project_config_file_small")
+                 has_file=i_have_file, base_dir="project_config_file_large")
     try:
         if i_have_file:
             state.mark_completed_peer(my_id)

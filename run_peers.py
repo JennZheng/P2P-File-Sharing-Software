@@ -20,7 +20,7 @@ def wait_until_listening(process, console_path):
 
 def main():
     project_dir = Path(__file__).resolve().parent
-    peer_info = project_dir / "project_config_file_small" / "PeerInfo.cfg"
+    peer_info = project_dir / "project_config_file_large" / "PeerInfo.cfg"
     processes = []
     console_files = []
 
