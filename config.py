@@ -1,8 +1,8 @@
 # reads the cfg files (Common and PeerInfo) and locates peers
 import math
 
-COMMON_CONFIG_PATH = "project_config_file_small/Common.cfg"
-PEER_INFO_PATH = "project_config_file_small/PeerInfo.cfg"
+COMMON_CONFIG_PATH = "project_config_file_large/Common.cfg"
+PEER_INFO_PATH = "project_config_file_large/PeerInfo.cfg"
 
 # -----Common.cfg-----
 common = {}
